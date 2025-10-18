@@ -1,14 +1,13 @@
 import express from "express";
 import cors from "cors";
 import dns from "dns";
-import fetch from "node-fetch"; // важно: Render уже поддерживает node-fetch
 
-console.log("🚀 Booting BuyWay Mail backend...");
+console.log("🚀 Booting BuyWay Mail backend (Resend)...");
 dns.setDefaultResultOrder?.("ipv4first");
 
 const app = express();
 
-// --- CORS: разрешаем нужные домены ---
+// --- CORS: разрешаем прод-домены и локалку ---
 const allowed = [
   "https://buyway.su",
   "https://www.buyway.su",
@@ -29,13 +28,20 @@ app.use(express.json());
 app.get("/", (_, res) => res.send("OK"));
 app.get("/healthz", (_, res) => res.status(200).send("ok"));
 
+// Простой чек на email (для Reply-To)
+const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+
+// === УКАЖИ адрес отправителя ПОСЛЕ валидации домена в Resend ===
+// Если верифицировал корень:  "noreply@buyway.su"
+// Если поддомен mail.buyway.su: "noreply@mail.buyway.su"
+const FROM_ADDRESS = "BuyWay <noreply@buyway.su>";
+
 // --- API: приём формы ---
 app.post("/api/submit", async (req, res) => {
   const { name, contact, link, comment } = req.body || {};
-  if (!name || !contact)
-    return res
-      .status(400)
-      .json({ ok: false, error: "Имя и контакт обязательны" });
+  if (!name || !contact) {
+    return res.status(400).json({ ok: false, error: "Имя и контакт обязательны" });
+  }
 
   const html = `
     <h2>Новая заявка с сайта BuyWay</h2>
@@ -46,25 +52,30 @@ app.post("/api/submit", async (req, res) => {
     <p><i>${new Date().toLocaleString()}</i></p>
   `;
 
+  const replyTo = emailRe.test(String(contact).trim())
+    ? String(contact).trim()
+    : undefined;
+
   try {
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: "BuyWay <onboarding@resend.dev>", // временно, потом заменим на buyway.su
-        to: ["buyway.service@gmail.com"],
+        from: FROM_ADDRESS,                          // отправитель (должен быть с верифицированного домена)
+        to: ["buyway.service@gmail.com"],            // получатель(и)
         subject: "Новая заявка с сайта BuyWay",
         html,
+        ...(replyTo ? { reply_to: replyTo } : {}),   // чтобы «Ответить» шло клиенту, если он указал email
       }),
     });
 
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       console.error("Resend error:", data);
-      throw new Error(data.message || "Send failed");
+      throw new Error(data?.message || JSON.stringify(data));
     }
 
     res.json({ ok: true });
