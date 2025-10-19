@@ -1,13 +1,15 @@
 import express from "express";
 import cors from "cors";
-import dns from "dns";
+import { Resend } from "resend";
 
+// --- Диагностика старта
 console.log("🚀 Booting BuyWay Mail backend (Resend)...");
-dns.setDefaultResultOrder?.("ipv4first");
+process.on("uncaughtException", (e) => console.error("Uncaught:", e));
+process.on("unhandledRejection", (e) => console.error("Unhandled:", e));
 
 const app = express();
 
-// --- CORS: разрешаем прод-домены и локалку ---
+// --- CORS: разрешаем твой домен и локалку
 const allowed = [
   "https://buyway.su",
   "https://www.buyway.su",
@@ -17,26 +19,46 @@ const allowed = [
 app.use(
   cors({
     origin: (origin, cb) =>
-      !origin || allowed.includes(origin)
-        ? cb(null, true)
-        : cb(new Error("Not allowed by CORS")),
+      !origin || allowed.includes(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS")),
   })
 );
 app.use(express.json());
 
-// --- Healthcheck ---
+// --- Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
+const SENDER =
+  process.env.SENDER_EMAIL?.trim() || "service@buyway.su"; // адрес отправителя
+const RECEIVER =
+  process.env.RECEIVER_EMAIL?.trim() || "service@buyway.su"; // куда слать тест
+
+// --- health
 app.get("/", (_, res) => res.send("OK"));
 app.get("/healthz", (_, res) => res.status(200).send("ok"));
 
-// Простой чек на email (для Reply-To)
-const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+// --- ТЕСТ. Открой в браузере /test-email — придёт письмо
+app.get("/test-email", async (_, res) => {
+  try {
+    const { data, error } = await resend.emails.send({
+      from: `BuyWay <${SENDER}>`,
+      to: [RECEIVER],
+      subject: "Тестовое письмо от BuyWay (Resend)",
+      html: `<h2>Проверка почты</h2>
+             <p>Если ты видишь это письмо — Resend настроен верно ✅</p>
+             <p><i>${new Date().toLocaleString()}</i></p>`,
+    });
 
-// === УКАЖИ адрес отправителя ПОСЛЕ валидации домена в Resend ===
-// Если верифицировал корень:  "noreply@buyway.su"
-// Если поддомен mail.buyway.su: "noreply@mail.buyway.su"
-const FROM_ADDRESS = "BuyWay <noreply@buyway.su>";
+    if (error) {
+      console.error("Resend error:", error);
+      return res.status(500).json({ ok: false, error });
+    }
+    res.json({ ok: true, id: data?.id || null });
+  } catch (e) {
+    console.error("TEST SEND ERROR:", e);
+    res.status(500).json({ ok: false, error: "Mail send failed" });
+  }
+});
 
-// --- API: приём формы ---
+// --- Продовый эндпоинт для формы
 app.post("/api/submit", async (req, res) => {
   const { name, contact, link, comment } = req.body || {};
   if (!name || !contact) {
@@ -45,46 +67,42 @@ app.post("/api/submit", async (req, res) => {
 
   const html = `
     <h2>Новая заявка с сайта BuyWay</h2>
-    <p><b>Имя:</b> ${name}</p>
-    <p><b>Контакт:</b> ${contact}</p>
-    <p><b>Ссылка:</b> ${link || "—"}</p>
-    <p><b>Комментарий:</b> ${comment || "—"}</p>
+    <p><b>Имя:</b> ${escapeHtml(name)}</p>
+    <p><b>Контакт:</b> ${escapeHtml(contact)}</p>
+    <p><b>Ссылка:</b> ${escapeHtml(link || "—")}</p>
+    <p><b>Комментарий:</b> ${escapeHtml(comment || "—")}</p>
     <p><i>${new Date().toLocaleString()}</i></p>
   `;
 
-  const replyTo = emailRe.test(String(contact).trim())
-    ? String(contact).trim()
-    : undefined;
-
   try {
-    const r = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: FROM_ADDRESS,                          // отправитель (должен быть с верифицированного домена)
-        to: ["buyway.service@gmail.com"],            // получатель(и)
-        subject: "Новая заявка с сайта BuyWay",
-        html,
-        ...(replyTo ? { reply_to: replyTo } : {}),   // чтобы «Ответить» шло клиенту, если он указал email
-      }),
+    const { error } = await resend.emails.send({
+      from: `BuyWay <${SENDER}>`,
+      to: [RECEIVER],
+      subject: "Новая заявка с сайта BuyWay",
+      html,
     });
 
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      console.error("Resend error:", data);
-      throw new Error(data?.message || JSON.stringify(data));
+    if (error) {
+      console.error("Resend error:", error);
+      return res.status(500).json({ ok: false, error: "Mail send failed" });
     }
-
     res.json({ ok: true });
   } catch (e) {
-    console.error("MAIL ERROR:", e);
-    res.status(500).json({ ok: false, error: e.message || String(e) });
+    console.error("SUBMIT SEND ERROR:", e);
+    res.status(500).json({ ok: false, error: "Mail send failed" });
   }
 });
 
-// --- Старт ---
+// --- Утилита для безопасности HTML
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// --- Старт
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log(`✅ API listening on :${PORT}`));
