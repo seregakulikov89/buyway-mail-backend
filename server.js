@@ -2,40 +2,45 @@ import express from "express";
 import cors from "cors";
 import { Resend } from "resend";
 
-// --- Диагностика старта
+// --- Диагностика запуска
 console.log("🚀 Booting BuyWay Mail backend (Resend)...");
 process.on("uncaughtException", (e) => console.error("Uncaught:", e));
 process.on("unhandledRejection", (e) => console.error("Unhandled:", e));
 
 const app = express();
 
-// --- CORS: разрешаем твой домен и локалку
-const allowed = [
+// --- Разрешённые источники (CORS)
+const allowedOrigins = [
   "https://buyway.su",
   "https://www.buyway.su",
   "http://localhost:5173",
-  "http://localhost:3000",
+  "http://localhost:3000"
 ];
+
 app.use(
   cors({
-    origin: (origin, cb) =>
-      !origin || allowed.includes(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS")),
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    }
   })
 );
+
 app.use(express.json());
 
-// --- Resend
+// --- Подключение Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
-const SENDER =
-  process.env.SENDER_EMAIL?.trim() || "service@buyway.su"; // адрес отправителя
-const RECEIVER =
-  process.env.RECEIVER_EMAIL?.trim() || "service@buyway.su"; // куда слать тест
+const SENDER = process.env.SENDER_EMAIL?.trim() || "service@buyway.su";
+const RECEIVER = process.env.RECEIVER_EMAIL?.trim() || "service@buyway.su";
 
-// --- health
+// --- Проверка статуса
 app.get("/", (_, res) => res.send("OK"));
 app.get("/healthz", (_, res) => res.status(200).send("ok"));
 
-// --- ТЕСТ. Открой в браузере /test-email — придёт письмо
+// --- Тестовое письмо
 app.get("/test-email", async (_, res) => {
   try {
     const { data, error } = await resend.emails.send({
@@ -43,14 +48,15 @@ app.get("/test-email", async (_, res) => {
       to: [RECEIVER],
       subject: "Тестовое письмо от BuyWay (Resend)",
       html: `<h2>Проверка почты</h2>
-             <p>Если ты видишь это письмо — Resend настроен верно ✅</p>
-             <p><i>${new Date().toLocaleString()}</i></p>`,
+             <p>Если ты видишь это письмо — Resend работает ✅</p>
+             <p><i>${new Date().toLocaleString()}</i></p>`
     });
 
     if (error) {
       console.error("Resend error:", error);
       return res.status(500).json({ ok: false, error });
     }
+
     res.json({ ok: true, id: data?.id || null });
   } catch (e) {
     console.error("TEST SEND ERROR:", e);
@@ -58,7 +64,7 @@ app.get("/test-email", async (_, res) => {
   }
 });
 
-// --- Продовый эндпоинт для формы
+// --- Обработка формы с сайта
 app.post("/api/submit", async (req, res) => {
   const { name, contact, link, comment } = req.body || {};
   if (!name || !contact) {
@@ -79,13 +85,14 @@ app.post("/api/submit", async (req, res) => {
       from: `BuyWay <${SENDER}>`,
       to: [RECEIVER],
       subject: "Новая заявка с сайта BuyWay",
-      html,
+      html
     });
 
     if (error) {
       console.error("Resend error:", error);
       return res.status(500).json({ ok: false, error: "Mail send failed" });
     }
+
     res.json({ ok: true });
   } catch (e) {
     console.error("SUBMIT SEND ERROR:", e);
@@ -93,7 +100,7 @@ app.post("/api/submit", async (req, res) => {
   }
 });
 
-// --- Утилита для безопасности HTML
+// --- Функция защиты HTML
 function escapeHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;")
@@ -103,6 +110,6 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
-// --- Старт
+// --- Запуск сервера
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log(`✅ API listening on :${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`✅ BuyWay Mail API listening on port ${PORT}`));
